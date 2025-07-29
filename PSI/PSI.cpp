@@ -30,10 +30,10 @@ typedef struct {
 } PSIData;
 
 template <typename T>
-static inline auto
-calculatePSI(const auto src, auto width, auto height, auto stride,
-             auto percentile, auto max_val, auto blocksize, auto threshold_w,
-             auto angle_tolerance, auto w_jnb, auto sobel_threshold) noexcept {
+static inline auto calculatePSI(auto src, auto width, auto height, auto stride,
+                                auto percentile, auto max_val, auto blocksize,
+                                auto threshold_w, auto angle_tolerance,
+                                auto w_jnb, auto sobel_threshold) noexcept {
     const auto stride_elements = stride / sizeof(T);
 
     const auto total_pixels = width * height;
@@ -156,8 +156,7 @@ calculatePSI(const auto src, auto width, auto height, auto stride,
                     const auto phi2 = (angle + 90.0f) * deg_to_rad;
                     const auto cos_phi2 = std::cos(phi2);
                     edge_widths[idx] = (width_up + width_down) / cos_phi2;
-                    const auto slope =
-                        (max_val - min_val) / edge_widths[idx];
+                    const auto slope = (max_val - min_val) / edge_widths[idx];
                     if (edge_widths[idx] >= w_jnb) {
                         edge_widths[idx] -= slope;
                     }
@@ -205,8 +204,7 @@ calculatePSI(const auto src, auto width, auto height, auto stride,
                     const auto phi2 = (angle - 90.0f) * deg_to_rad;
                     const auto cos_phi2 = std::cos(phi2);
                     edge_widths[idx] = (width_up + width_down) / cos_phi2;
-                    const auto slope =
-                        (max_val - min_val) / edge_widths[idx];
+                    const auto slope = (max_val - min_val) / edge_widths[idx];
                     if (edge_widths[idx] >= w_jnb) {
                         edge_widths[idx] -= slope;
                     }
@@ -280,6 +278,32 @@ calculatePSI(const auto src, auto width, auto height, auto stride,
     return (sum_sharpest > 0.0f)
                ? (static_cast<float>(blocks_to_sum) / sum_sharpest)
                : 0.0f;
+}
+
+template <typename T, typename Validator>
+static inline bool getAndValidateParam(auto in, auto vsapi, auto param_name,
+                                       T default_value, auto& result,
+                                       auto filter_name, auto out,
+                                       Validator validator, auto error_msg) {
+    auto err = 0;
+    if constexpr (std::is_same_v<T, float>) {
+        result = static_cast<T>(vsapi->mapGetFloat(in, param_name, 0, &err));
+    } else if constexpr (std::is_same_v<T, int>) {
+        result = static_cast<T>(vsapi->mapGetInt(in, param_name, 0, &err));
+    }
+
+    if (err) {
+        result = default_value;
+        return true;
+    }
+
+    if (!validator(result)) {
+        vsapi->mapSetError(
+            out, std::format("{}: {}", filter_name, error_msg).c_str());
+        return false;
+    }
+
+    return true;
 }
 
 static inline const VSFrame* VS_CC psiGetFrame(auto n, auto activationReason,
@@ -359,7 +383,6 @@ static inline auto VS_CC psiCreate(auto in, auto out,
                                    auto vsapi) noexcept {
     PSIData d;
     PSIData* data;
-    auto err = 0;
 
     constexpr auto filter_name = "PSI";
 
@@ -391,84 +414,53 @@ static inline auto VS_CC psiCreate(auto in, auto out,
         return;
     }
 
-    d.percentile =
-        static_cast<float>(vsapi->mapGetFloat(in, "percentile", 0, &err));
-    if (err) {
-        d.percentile = DEFAULT_PERCENTILE;
-    }
-
-    if (d.percentile <= 0.0f || d.percentile > 100.0f) {
-        vsapi->mapSetError(
-            out, std::format("{}: percentile must be in the range (0, 100]",
-                             filter_name)
-                     .c_str());
+    if (!getAndValidateParam(
+            in, vsapi, "percentile", DEFAULT_PERCENTILE, d.percentile,
+            filter_name, out,
+            [](float val) { return val > 0.0f && val <= 100.0f; },
+            "percentile must be in the range (0, 100]")) {
         vsapi->freeNode(d.node);
         return;
     }
 
-    d.blocksize = static_cast<int>(vsapi->mapGetInt(in, "blocksize", 0, &err));
-    if (err) {
-        d.blocksize = DEFAULT_BLOCKSIZE;
-    }
-    if (d.blocksize <= 0) {
-        vsapi->mapSetError(
-            out,
-            std::format("{}: blocksize must be greater than 0", filter_name)
-                .c_str());
+    if (!getAndValidateParam(
+            in, vsapi, "blocksize", DEFAULT_BLOCKSIZE, d.blocksize, filter_name,
+            out, [](int val) { return val > 0; },
+            "blocksize must be greater than 0")) {
         vsapi->freeNode(d.node);
         return;
     }
 
-    d.threshold_w =
-        static_cast<float>(vsapi->mapGetFloat(in, "threshold_w", 0, &err));
-    if (err) {
-        d.threshold_w = DEFAULT_THRESHOLD_W;
-    }
-    if (d.threshold_w < 0.0f) {
-        vsapi->mapSetError(
-            out,
-            std::format("{}: threshold_w must be non-negative", filter_name)
-                .c_str());
+    if (!getAndValidateParam(
+            in, vsapi, "threshold_w", DEFAULT_THRESHOLD_W, d.threshold_w,
+            filter_name, out, [](float val) { return val >= 0.0f; },
+            "threshold_w must be non-negative")) {
         vsapi->freeNode(d.node);
         return;
     }
 
-    d.angle_tolerance =
-        static_cast<float>(vsapi->mapGetFloat(in, "angle_tolerance", 0, &err));
-    if (err) {
-        d.angle_tolerance = DEFAULT_ANGLE_TOLERANCE;
-    }
-    if (d.angle_tolerance <= 0.0f || d.angle_tolerance > 90.0f) {
-        vsapi->mapSetError(
-            out, std::format("{}: angle_tolerance must be in the range (0, 90]",
-                             filter_name)
-                     .c_str());
+    if (!getAndValidateParam(
+            in, vsapi, "angle_tolerance", DEFAULT_ANGLE_TOLERANCE,
+            d.angle_tolerance, filter_name, out,
+            [](float val) { return val > 0.0f && val <= 90.0f; },
+            "angle_tolerance must be in the range (0, 90]")) {
         vsapi->freeNode(d.node);
         return;
     }
 
-    d.w_jnb = static_cast<float>(vsapi->mapGetFloat(in, "w_jnb", 0, &err));
-    if (err) {
-        d.w_jnb = DEFAULT_W_JNB;
-    }
-    if (d.w_jnb < 0.0f) {
-        vsapi->mapSetError(
-            out,
-            std::format("{}: w_jnb must be non-negative", filter_name).c_str());
+    if (!getAndValidateParam(
+            in, vsapi, "w_jnb", DEFAULT_W_JNB, d.w_jnb, filter_name, out,
+            [](float val) { return val >= 0.0f; },
+            "w_jnb must be non-negative")) {
         vsapi->freeNode(d.node);
         return;
     }
 
-    d.sobel_threshold =
-        static_cast<float>(vsapi->mapGetFloat(in, "sobel_threshold", 0, &err));
-    if (err) {
-        d.sobel_threshold = DEFAULT_SOBEL_THRESHOLD;
-    }
-    if (d.sobel_threshold < 0.0f) {
-        vsapi->mapSetError(
-            out,
-            std::format("{}: sobel_threshold must be non-negative", filter_name)
-                .c_str());
+    if (!getAndValidateParam(
+            in, vsapi, "sobel_threshold", DEFAULT_SOBEL_THRESHOLD,
+            d.sobel_threshold, filter_name, out,
+            [](float val) { return val >= 0.0f; },
+            "sobel_threshold must be non-negative")) {
         vsapi->freeNode(d.node);
         return;
     }
