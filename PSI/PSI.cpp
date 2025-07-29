@@ -25,9 +25,6 @@ typedef struct {
     VSNode* node;
     const VSVideoInfo* vi;
     float percentile;
-    int bits_per_sample;
-    VSSampleType sample_type;
-    uint16_t max_value;
     int blocksize;
     float threshold_w;
     float angle_tolerance;
@@ -36,7 +33,7 @@ typedef struct {
     OutputMode output_mode;
 } PSIData;
 
-template <typename T, bool NeedSharpnessMap = false>
+template <typename T, auto NeedSharpnessMap = false>
 static inline auto calculatePSI(auto src, auto width, auto height, auto stride,
                                 auto percentile, auto max_val, auto blocksize,
                                 auto threshold_w, auto angle_tolerance,
@@ -51,7 +48,7 @@ static inline auto calculatePSI(auto src, auto width, auto height, auto stride,
             ? sobel_threshold
             : sobel_threshold * static_cast<float>(max_val);
 
-    std::vector<bool> edges(total_pixels, false);
+    std::vector<uint8_t> edges(total_pixels, 0);
     std::vector<float> Ix(total_pixels, 0.0f);
     std::vector<float> Iy(total_pixels, 0.0f);
 
@@ -337,9 +334,10 @@ static inline const VSFrame* VS_CC psiGetFrame(auto n, auto activationReason,
         const auto width = vsapi->getFrameWidth(src, 0);
 
         VSFrame* dst;
-        const auto max_val = (d->sample_type == stFloat)
-                                 ? 1.0f
-                                 : static_cast<float>(d->max_value);
+        const auto max_val =
+            (d->vi->format.sampleType == stFloat)
+                ? 1.0f
+                : static_cast<float>((1 << d->vi->format.bitsPerSample) - 1);
 
         if constexpr (Mode == OUTPUT_MODE_ORIGINAL) {
             const auto numPlanes = fi->numPlanes;
@@ -369,8 +367,8 @@ static inline const VSFrame* VS_CC psiGetFrame(auto n, auto activationReason,
             sharpness_ptr = sharpness_map.data();
         }
 
-        if (d->sample_type == stInteger) {
-            if (d->bits_per_sample == 8) {
+        if (d->vi->format.sampleType == stInteger) {
+            if (d->vi->format.bitsPerSample == 8) {
                 psi_score =
                     calculatePSI<uint8_t, (Mode == OUTPUT_MODE_SHARPNESS_MAP)>(
                         static_cast<const uint8_t*>(srcp), width, height,
@@ -520,15 +518,6 @@ static inline auto VS_CC psiCreate(auto in, auto out,
             "output_mode must be 0 (original frame) or 1 (sharpness map)")) {
         vsapi->freeNode(d.node);
         return;
-    }
-
-    d.sample_type = static_cast<VSSampleType>(vi->format.sampleType);
-    d.bits_per_sample = vi->format.bitsPerSample;
-
-    if (d.sample_type == stInteger) {
-        d.max_value = static_cast<uint16_t>((1 << d.bits_per_sample) - 1);
-    } else {
-        d.max_value = 0;
     }
 
     data = static_cast<PSIData*>(malloc(sizeof(d)));
