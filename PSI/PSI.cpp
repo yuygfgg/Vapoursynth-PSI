@@ -29,11 +29,10 @@ typedef struct {
 } PSIData;
 
 template <typename T>
-static inline auto calculatePSI(const auto src, auto width, auto height, 
-                                auto stride, auto percentile, 
-                                auto max_val, auto blocksize, auto threshold_w,
-                                auto angle_tolerance, auto w_jnb, 
-                                auto sobel_threshold) noexcept {
+static inline auto
+calculatePSI(const auto src, auto width, auto height, auto stride,
+             auto percentile, auto max_val, auto blocksize, auto threshold_w,
+             auto angle_tolerance, auto w_jnb, auto sobel_threshold) noexcept {
     const auto stride_elements = stride / sizeof(T);
 
     const auto inv_max_val =
@@ -250,8 +249,7 @@ static inline auto calculatePSI(const auto src, auto width, auto height,
 
     std::sort(avg_w.begin(), avg_w.end());
 
-    const auto quota_w =
-        percentile * 0.01f;
+    const auto quota_w = percentile * 0.01f;
     const auto nr_of_used_blocks =
         static_cast<int>(std::ceil(avg_w.size() * quota_w));
 
@@ -271,10 +269,11 @@ static inline auto calculatePSI(const auto src, auto width, auto height,
                : 0.0f;
 }
 
-static inline const VSFrame* VS_CC
-psiGetFrame(auto n, auto activationReason, auto instanceData,
-            [[maybe_unused]] auto frameData, auto frameCtx, auto core,
-            auto vsapi) noexcept {
+static inline const VSFrame* VS_CC psiGetFrame(auto n, auto activationReason,
+                                               auto instanceData,
+                                               [[maybe_unused]] auto frameData,
+                                               auto frameCtx, auto core,
+                                               auto vsapi) noexcept {
     auto d = static_cast<PSIData*>(instanceData);
 
     if (activationReason == arInitial) {
@@ -285,26 +284,15 @@ psiGetFrame(auto n, auto activationReason, auto instanceData,
         const auto height = vsapi->getFrameHeight(src, 0);
         const auto width = vsapi->getFrameWidth(src, 0);
 
-        const auto dst = vsapi->newVideoFrame(fi, width, height, src, core);
-
-        for (auto plane = 0; plane < fi->numPlanes; plane++) {
-            const auto srcp = vsapi->getReadPtr(src, plane);
-            auto dstp = vsapi->getWritePtr(dst, plane);
-            const auto src_stride = vsapi->getStride(src, plane);
-            const auto dst_stride = vsapi->getStride(dst, plane);
-            const auto plane_height = vsapi->getFrameHeight(src, plane);
-
-            if (src_stride == dst_stride) {
-                std::memcpy(dstp, srcp, src_stride * plane_height);
-            } else {
-                for (auto y = 0; y < plane_height; y++) {
-                    std::memcpy(static_cast<uint8_t*>(dstp) + y * dst_stride,
-                                static_cast<const uint8_t*>(srcp) +
-                                    y * src_stride,
-                                std::min(src_stride, dst_stride));
-                }
-            }
+        const auto numPlanes = fi->numPlanes;
+        std::vector<const VSFrame*> planeSrc(numPlanes, src);
+        std::vector<int> planes(numPlanes);
+        for (auto i = 0; i < numPlanes; ++i) {
+            planes[i] = i;
         }
+
+        const auto dst = vsapi->newVideoFrame2(
+            fi, width, height, planeSrc.data(), planes.data(), src, core);
 
         const void* srcp = vsapi->getReadPtr(src, 0);
         const auto src_stride = vsapi->getStride(src, 0);
