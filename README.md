@@ -35,6 +35,8 @@ The filter outputs the following frame property:
 
 ## Building
 
+[Eigen](https://github.com/PX4/eigen) is required.
+
 ```bash
 meson setup build
 ninja -C build install
