@@ -1,5 +1,7 @@
 #include "VSHelper4.h"
 #include "VapourSynth4.h"
+#include <Eigen/Core>
+#include <Eigen/Dense>
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -33,121 +35,128 @@ typedef struct {
     OutputMode output_mode;
 } PSIData;
 
+template <typename Derived1, typename Derived2>
+inline auto atan2(const Eigen::ArrayBase<Derived1>& var_y,
+                  const Eigen::ArrayBase<Derived2>& var_x) {
+    using Scalar = typename Derived1::Scalar;
+
+    return var_y.binaryExpr(
+        var_x, [](Scalar y, Scalar x) -> Scalar { return std::atan2(y, x); });
+}
+
 template <typename T, auto NeedSharpnessMap = false>
 static inline auto calculatePSI(auto src, auto width, auto height, auto stride,
                                 auto percentile, auto max_val, auto blocksize,
                                 auto threshold_w, auto angle_tolerance,
                                 auto w_jnb, auto sobel_threshold,
                                 auto sharpness_map = nullptr) noexcept {
-    const auto stride_elements = stride / sizeof(T);
+    using namespace Eigen;
 
-    const auto total_pixels = width * height;
+    const auto stride_elements = stride / sizeof(T);
 
     const auto sobel_threshold_scaled =
         (std::is_same_v<T, float>)
             ? sobel_threshold
             : sobel_threshold * static_cast<float>(max_val);
 
-    std::vector<uint8_t> edges(total_pixels, 0);
-    std::vector<float> Ix(total_pixels, 0.0f);
-    std::vector<float> Iy(total_pixels, 0.0f);
+    Map<const Matrix<T, Dynamic, Dynamic, RowMajor>, 0, OuterStride<>>
+        src_matrix(reinterpret_cast<const T*>(src), height, width,
+                   OuterStride<>(stride_elements));
+
+    MatrixXf image_for_sobel;
+    if constexpr (std::is_same_v<T, float>) {
+        image_for_sobel = src_matrix.template cast<float>();
+    } else {
+        image_for_sobel = src_matrix.template cast<float>();
+    }
+
+    MatrixXf image_float;
+    if constexpr (std::is_same_v<T, float>) {
+        image_float = src_matrix.template cast<float>();
+    } else {
+        image_float =
+            src_matrix.template cast<float>() / static_cast<float>(max_val);
+    }
+
+    Matrix3f sobel_x, sobel_y;
+
+    // clang-format off
+    sobel_x <<  -1, 0, 1, 
+                -2, 0, 2, 
+                -1, 0, 1;
+
+    sobel_y <<  -1, -2, -1, 
+                0, 0, 0, 
+                1, 2, 1;
+    // clang-format on
+
+    MatrixXf Ix = MatrixXf::Zero(height, width);
+    MatrixXf Iy = MatrixXf::Zero(height, width);
+
+    for (int y = 1; y < height - 1; ++y) {
+        for (int x = 1; x < width - 1; ++x) {
+            auto neighborhood = image_for_sobel.block<3, 3>(y - 1, x - 1);
+
+            Ix(y, x) = (neighborhood.cwiseProduct(sobel_x)).sum();
+            Iy(y, x) = (neighborhood.cwiseProduct(sobel_y)).sum();
+        }
+    }
+
+    auto magnitude_sq = Ix.cwiseProduct(Ix) + Iy.cwiseProduct(Iy);
 
     const auto sobel_threshold_sq =
         sobel_threshold_scaled * sobel_threshold_scaled;
+    Array<bool, Dynamic, Dynamic> edges =
+        (magnitude_sq.array() > sobel_threshold_sq);
 
-    auto get = [&](int r, int c) {
-        return static_cast<float>((src + r * stride_elements)[c]);
-    };
+    constexpr auto rad_to_deg = 180.0f / std::numbers::pi_v<float>;
 
-    for (auto y = 1; y < height - 1; ++y) {
-        auto ix_row = Ix.data() + y * width;
-        auto iy_row = Iy.data() + y * width;
+    auto phi_array = atan2(Iy.array(), Ix.array()) * rad_to_deg;
+    MatrixXf phi = phi_array.matrix();
 
-        for (auto x = 1; x < width - 1; ++x) {
-            const auto p_tl = get(y - 1, x - 1);
-            const auto p_tc = get(y - 1, x);
-            const auto p_tr = get(y - 1, x + 1);
-            const auto p_ml = get(y, x - 1);
-            const auto p_mr = get(y, x + 1);
-            const auto p_bl = get(y + 1, x - 1);
-            const auto p_bc = get(y + 1, x);
-            const auto p_br = get(y + 1, x + 1);
-
-            const auto gx = -p_tl + p_tr + -2 * p_ml + 2 * p_mr + -p_bl + p_br;
-
-            const auto gy = -p_tl - 2 * p_tc - p_tr + p_bl + 2 * p_bc + p_br;
-
-            const auto magnitude_sq = gx * gx + gy * gy;
-            edges[y * width + x] = (magnitude_sq > sobel_threshold_sq);
-
-            ix_row[x] = gx;
-            iy_row[x] = gy;
-        }
-    }
-
-    std::vector<float> phi(total_pixels);
-    constexpr auto rad_to_deg = 180.0f / std::numbers::pi;
-
-    for (auto i = 0; i < total_pixels; ++i) {
-        phi[i] = std::atan2(Iy[i], Ix[i]) * rad_to_deg;
-    }
-
-    std::vector<float> edge_widths(total_pixels, 0.0f);
+    MatrixXf edge_widths = MatrixXf::Zero(height, width);
     auto widths_count = 0;
 
-    constexpr auto deg_to_rad = std::numbers::pi / 180.0f;
-
-    auto get_normalized = [&](int r, int c) {
-        if constexpr (std::is_same_v<T, float>) {
-            return (src + r * stride_elements)[c];
-        } else {
-            return static_cast<float>((src + r * stride_elements)[c]) /
-                   static_cast<float>(max_val);
-        }
-    };
+    constexpr auto deg_to_rad = std::numbers::pi_v<float> / 180.0f;
 
     for (auto y = 0; y < height; ++y) {
         for (auto x = 0; x < width; ++x) {
-            const auto idx = y * width + x;
-            if (!edges[idx] || (Ix[idx] == 0.0f && Iy[idx] == 0.0f)) {
+            if (!edges(y, x) || (Ix(y, x) == 0.0f && Iy(y, x) == 0.0f)) {
                 continue;
             }
 
-            const auto angle = phi[idx];
+            const auto angle = phi(y, x);
             auto width_up = 0;
             auto width_down = 0;
             auto valid_width = false;
             auto min_val = 0.0f;
-            auto max_val = 0.0f;
+            auto max_val_local = 0.0f;
 
-            // Check for horizontal edge, gradient pointing upwards (~90°)
             if (std::abs(angle + 90.0f) < angle_tolerance) {
-                // Search upward
-                auto prev_val_up = get_normalized(y, x);
+                auto prev_val_up = image_float(y, x);
                 for (auto d = 1; d < height; d++) {
                     auto up = y - d;
                     if (up < 0) {
                         width_up = -1;
                         break;
                     }
-                    const auto curr_val_up = get_normalized(up, x);
+                    const auto curr_val_up = image_float(up, x);
                     if (curr_val_up <= prev_val_up) {
                         width_up = d - 1;
-                        max_val = prev_val_up;
+                        max_val_local = prev_val_up;
                         break;
                     }
                     prev_val_up = curr_val_up;
                 }
 
-                // Search downward
-                auto prev_val_down = get_normalized(y, x);
+                auto prev_val_down = image_float(y, x);
                 for (auto d = 1; d < height; d++) {
                     auto down = y + d;
                     if (down >= height) {
                         width_down = -1;
                         break;
                     }
-                    const auto curr_val_down = get_normalized(down, x);
+                    const auto curr_val_down = image_float(down, x);
                     if (curr_val_down >= prev_val_down) {
                         width_down = d - 1;
                         min_val = prev_val_down;
@@ -160,25 +169,22 @@ static inline auto calculatePSI(auto src, auto width, auto height, auto stride,
                     valid_width = true;
                     const auto phi2 = (angle + 90.0f) * deg_to_rad;
                     const auto cos_phi2 = std::cos(phi2);
-                    edge_widths[idx] = (width_up + width_down) / cos_phi2;
-                    const auto slope = (max_val - min_val) / edge_widths[idx];
-                    if (edge_widths[idx] >= w_jnb) {
-                        edge_widths[idx] -= slope;
+                    edge_widths(y, x) = (width_up + width_down) / cos_phi2;
+                    const auto slope =
+                        (max_val_local - min_val) / edge_widths(y, x);
+                    if (edge_widths(y, x) >= w_jnb) {
+                        edge_widths(y, x) -= slope;
                     }
                 }
-            }
-
-            // Check for horizontal edge, gradient pointing downwards (~-90°)
-            if (std::abs(angle - 90.0f) < angle_tolerance) {
-                // Search upward
-                auto prev_val_up = get_normalized(y, x);
+            } else if (std::abs(angle - 90.0f) < angle_tolerance) {
+                auto prev_val_up = image_float(y, x);
                 for (auto d = 1; d < height; d++) {
                     auto up = y - d;
                     if (up < 0) {
                         width_up = -1;
                         break;
                     }
-                    const auto curr_val_up = get_normalized(up, x);
+                    const auto curr_val_up = image_float(up, x);
                     if (curr_val_up >= prev_val_up) {
                         width_up = d - 1;
                         min_val = prev_val_up;
@@ -187,18 +193,17 @@ static inline auto calculatePSI(auto src, auto width, auto height, auto stride,
                     prev_val_up = curr_val_up;
                 }
 
-                // Search downward
-                auto prev_val_down = get_normalized(y, x);
+                auto prev_val_down = image_float(y, x);
                 for (auto d = 1; d < height; d++) {
                     auto down = y + d;
                     if (down >= height) {
                         width_down = -1;
                         break;
                     }
-                    const auto curr_val_down = get_normalized(down, x);
+                    const auto curr_val_down = image_float(down, x);
                     if (curr_val_down <= prev_val_down) {
                         width_down = d - 1;
-                        max_val = prev_val_down;
+                        max_val_local = prev_val_down;
                         break;
                     }
                     prev_val_down = curr_val_down;
@@ -208,10 +213,11 @@ static inline auto calculatePSI(auto src, auto width, auto height, auto stride,
                     valid_width = true;
                     const auto phi2 = (angle - 90.0f) * deg_to_rad;
                     const auto cos_phi2 = std::cos(phi2);
-                    edge_widths[idx] = (width_up + width_down) / cos_phi2;
-                    const auto slope = (max_val - min_val) / edge_widths[idx];
-                    if (edge_widths[idx] >= w_jnb) {
-                        edge_widths[idx] -= slope;
+                    edge_widths(y, x) = (width_up + width_down) / cos_phi2;
+                    const auto slope =
+                        (max_val_local - min_val) / edge_widths(y, x);
+                    if (edge_widths(y, x) >= w_jnb) {
+                        edge_widths(y, x) -= slope;
                     }
                 }
             }
@@ -232,31 +238,26 @@ static inline auto calculatePSI(auto src, auto width, auto height, auto stride,
     avg_w.reserve((row_blocks - 2) * (col_blocks - 2));
 
     for (auto i = 1; i < row_blocks - 1; ++i) {
+        std::vector<float> local_avg_w;
         for (auto j = 1; j < col_blocks - 1; ++j) {
             const auto block_row = i * blocksize;
             const auto block_col = j * blocksize;
 
-            auto w_sum = 0.0f;
-            auto non_zero_count = 0;
-
             const auto block_end_y = std::min(block_row + blocksize, height);
             const auto block_end_x = std::min(block_col + blocksize, width);
 
-            for (auto y = block_row; y < block_end_y; ++y) {
-                const auto edge_row = edge_widths.data() + y * width;
-                for (auto x = block_col; x < block_end_x; ++x) {
-                    const auto w = edge_row[x];
-                    w_sum += w;
-                    if (w != 0.0f) {
-                        ++non_zero_count;
-                    }
-                }
-            }
+            auto block =
+                edge_widths.block(block_row, block_col, block_end_y - block_row,
+                                  block_end_x - block_col);
+
+            const auto w_sum = block.sum();
+            const auto non_zero_count = (block.array() != 0.0f).count();
 
             if (w_sum >= threshold_w && non_zero_count > 0) {
-                avg_w.push_back(w_sum / non_zero_count);
+                local_avg_w.push_back(w_sum / non_zero_count);
             }
         }
+        avg_w.insert(avg_w.end(), local_avg_w.begin(), local_avg_w.end());
     }
 
     if (avg_w.empty()) {
@@ -276,45 +277,19 @@ static inline auto calculatePSI(auto src, auto width, auto height, auto stride,
     auto sum_sharpest = 0.0f;
     const auto blocks_to_sum =
         std::min(nr_of_used_blocks, static_cast<int>(avg_w.size()));
-    for (auto i = 0; i < blocks_to_sum; ++i) {
-        sum_sharpest += avg_w[i];
-    }
+
+    Eigen::Map<const Eigen::VectorXf> avg_w_vec(avg_w.data(), blocks_to_sum);
+    sum_sharpest = avg_w_vec.sum();
 
     if constexpr (NeedSharpnessMap) {
-        std::copy(edge_widths.begin(), edge_widths.end(), sharpness_map);
+        Map<Matrix<float, Dynamic, Dynamic, RowMajor>> output_map(
+            sharpness_map, height, width);
+        output_map = edge_widths;
     }
 
     return (sum_sharpest > 0.0f)
                ? (static_cast<float>(blocks_to_sum) / sum_sharpest)
                : 0.0f;
-}
-
-template <typename T, typename Validator>
-static inline bool getAndValidateParam(auto in, auto vsapi, auto param_name,
-                                       T default_value, auto& result,
-                                       auto filter_name, auto out,
-                                       Validator validator, auto error_msg) {
-    auto err = 0;
-    if constexpr (std::is_same_v<T, float>) {
-        result = static_cast<T>(vsapi->mapGetFloat(in, param_name, 0, &err));
-    } else if constexpr (std::is_same_v<T, int>) {
-        result = static_cast<T>(vsapi->mapGetInt(in, param_name, 0, &err));
-    } else if constexpr (std::is_enum_v<T>) {
-        result = static_cast<T>(vsapi->mapGetInt(in, param_name, 0, &err));
-    }
-
-    if (err) {
-        result = default_value;
-        return true;
-    }
-
-    if (!validator(result)) {
-        vsapi->mapSetError(
-            out, std::format("{}: {}", filter_name, error_msg).c_str());
-        return false;
-    }
-
-    return true;
 }
 
 template <OutputMode Mode>
@@ -421,6 +396,34 @@ static inline auto VS_CC psiFilterFree(auto instanceData,
     free(d);
 }
 
+template <typename T, typename Validator>
+static inline bool getAndValidateParam(auto in, auto vsapi, auto param_name,
+                                       T default_value, auto& result,
+                                       auto filter_name, auto out,
+                                       Validator validator, auto error_msg) {
+    auto err = 0;
+    if constexpr (std::is_same_v<T, float>) {
+        result = static_cast<T>(vsapi->mapGetFloat(in, param_name, 0, &err));
+    } else if constexpr (std::is_same_v<T, int>) {
+        result = static_cast<T>(vsapi->mapGetInt(in, param_name, 0, &err));
+    } else if constexpr (std::is_enum_v<T>) {
+        result = static_cast<T>(vsapi->mapGetInt(in, param_name, 0, &err));
+    }
+
+    if (err) {
+        result = default_value;
+        return true;
+    }
+
+    if (!validator(result)) {
+        vsapi->mapSetError(
+            out, std::format("{}: {}", filter_name, error_msg).c_str());
+        return false;
+    }
+
+    return true;
+}
+
 static inline auto VS_CC psiCreate(auto in, auto out,
                                    [[maybe_unused]] auto userData, auto core,
                                    auto vsapi) noexcept {
@@ -443,16 +446,17 @@ static inline auto VS_CC psiCreate(auto in, auto out,
         return;
     }
 
-    if (!(((vi->format.bitsPerSample == 8 || vi->format.bitsPerSample == 16) &&
+    if (!(((vi->format.bitsPerSample >= 8 && vi->format.bitsPerSample <= 16) &&
            vi->format.sampleType == stInteger) ||
           (vi->format.bitsPerSample == 32 &&
            vi->format.sampleType == stFloat))) {
         vsapi->mapSetError(
-            out,
-            std::format(
-                "{}: only 8-16 bit integer or 32 bit float input are accepted",
-                filter_name)
-                .c_str());
+            out, std::format("{}: only 8-16 bit integer or 32 bit float input "
+                             "are accepted, got {} bit {}",
+                             filter_name, vi->format.bitsPerSample,
+                             vi->format.sampleType == stInteger ? "integer"
+                                                                : "float")
+                     .c_str());
         vsapi->freeNode(d.node);
         return;
     }
@@ -461,7 +465,9 @@ static inline auto VS_CC psiCreate(auto in, auto out,
             in, vsapi, "percentile", DEFAULT_PERCENTILE, d.percentile,
             filter_name, out,
             [](auto val) { return val > 0.0f && val <= 100.0f; },
-            "percentile must be in the range (0, 100]")) {
+            std::format("percentile must be in the range (0, 100], got {}",
+                        d.percentile)
+                .c_str())) {
         vsapi->freeNode(d.node);
         return;
     }
@@ -469,7 +475,8 @@ static inline auto VS_CC psiCreate(auto in, auto out,
     if (!getAndValidateParam(
             in, vsapi, "blocksize", DEFAULT_BLOCKSIZE, d.blocksize, filter_name,
             out, [](auto val) { return val > 0; },
-            "blocksize must be greater than 0")) {
+            std::format("blocksize must be greater than 0, got {}", d.blocksize)
+                .c_str())) {
         vsapi->freeNode(d.node);
         return;
     }
@@ -477,7 +484,9 @@ static inline auto VS_CC psiCreate(auto in, auto out,
     if (!getAndValidateParam(
             in, vsapi, "threshold_w", DEFAULT_THRESHOLD_W, d.threshold_w,
             filter_name, out, [](auto val) { return val >= 0.0f; },
-            "threshold_w must be non-negative")) {
+            std::format("threshold_w must be non-negative, got {}",
+                        d.threshold_w)
+                .c_str())) {
         vsapi->freeNode(d.node);
         return;
     }
@@ -486,7 +495,9 @@ static inline auto VS_CC psiCreate(auto in, auto out,
             in, vsapi, "angle_tolerance", DEFAULT_ANGLE_TOLERANCE,
             d.angle_tolerance, filter_name, out,
             [](auto val) { return val > 0.0f && val <= 90.0f; },
-            "angle_tolerance must be in the range (0, 90]")) {
+            std::format("angle_tolerance must be in the range (0, 90], got {}",
+                        d.angle_tolerance)
+                .c_str())) {
         vsapi->freeNode(d.node);
         return;
     }
@@ -494,7 +505,8 @@ static inline auto VS_CC psiCreate(auto in, auto out,
     if (!getAndValidateParam(
             in, vsapi, "w_jnb", DEFAULT_W_JNB, d.w_jnb, filter_name, out,
             [](auto val) { return val >= 0.0f; },
-            "w_jnb must be non-negative")) {
+            std::format("w_jnb must be non-negative, got {}", d.w_jnb)
+                .c_str())) {
         vsapi->freeNode(d.node);
         return;
     }
@@ -503,21 +515,30 @@ static inline auto VS_CC psiCreate(auto in, auto out,
             in, vsapi, "sobel_threshold", DEFAULT_SOBEL_THRESHOLD,
             d.sobel_threshold, filter_name, out,
             [](auto val) { return val >= 0.0f; },
-            "sobel_threshold must be non-negative")) {
+            std::format("sobel_threshold must be non-negative, got {}",
+                        d.sobel_threshold)
+                .c_str())) {
         vsapi->freeNode(d.node);
         return;
     }
 
-    if (!getAndValidateParam<OutputMode>(
-            in, vsapi, "output_mode", OUTPUT_MODE_ORIGINAL, d.output_mode,
-            filter_name, out,
-            [](auto val) {
-                return val == OUTPUT_MODE_ORIGINAL ||
-                       val == OUTPUT_MODE_SHARPNESS_MAP;
-            },
-            "output_mode must be 0 (original frame) or 1 (sharpness map)")) {
-        vsapi->freeNode(d.node);
-        return;
+    auto err = 0;
+    auto raw_output_mode = vsapi->mapGetInt(in, "output_mode", 0, &err);
+    if (err) {
+        d.output_mode = OUTPUT_MODE_ORIGINAL;
+    } else {
+        if (raw_output_mode != OUTPUT_MODE_ORIGINAL &&
+            raw_output_mode != OUTPUT_MODE_SHARPNESS_MAP) {
+            vsapi->mapSetError(
+                out,
+                std::format("{}: output_mode must be 0 (original frame) or 1 "
+                            "(sharpness map), got {}",
+                            filter_name, raw_output_mode)
+                    .c_str());
+            vsapi->freeNode(d.node);
+            return;
+        }
+        d.output_mode = static_cast<OutputMode>(raw_output_mode);
     }
 
     data = static_cast<PSIData*>(malloc(sizeof(d)));
