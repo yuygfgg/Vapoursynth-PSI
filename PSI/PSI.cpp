@@ -17,6 +17,7 @@ static constexpr auto DEFAULT_SOBEL_THRESHOLD = 0.1f;
 
 typedef struct {
     VSNode* node;
+    const VSVideoInfo* vi;
     float percentile;
     int bits_per_sample;
     VSSampleType sample_type;
@@ -35,50 +36,41 @@ calculatePSI(const auto src, auto width, auto height, auto stride,
              auto angle_tolerance, auto w_jnb, auto sobel_threshold) noexcept {
     const auto stride_elements = stride / sizeof(T);
 
-    const auto inv_max_val =
-        (std::is_same_v<T, float>) ? 1.0f : (1.0f / max_val);
     const auto total_pixels = width * height;
 
-    std::vector<float> image(total_pixels);
-
-    if constexpr (std::is_same_v<T, float>) {
-        for (auto y = 0; y < height; y++) {
-            const auto src_row = src + y * stride_elements;
-            auto dst_row = image.data() + y * width;
-            std::memcpy(dst_row, src_row, width * sizeof(float));
-        }
-    } else {
-        for (auto y = 0; y < height; y++) {
-            const auto src_row = src + y * stride_elements;
-            auto dst_row = image.data() + y * width;
-            for (auto x = 0; x < width; ++x) {
-                dst_row[x] = static_cast<float>(src_row[x]) * inv_max_val;
-            }
-        }
-    }
+    const auto sobel_threshold_scaled =
+        (std::is_same_v<T, float>)
+            ? sobel_threshold
+            : sobel_threshold * static_cast<float>(max_val);
 
     std::vector<bool> edges(total_pixels, false);
     std::vector<float> Ix(total_pixels, 0.0f);
     std::vector<float> Iy(total_pixels, 0.0f);
 
-    const auto sobel_threshold_sq = sobel_threshold * sobel_threshold;
+    const auto sobel_threshold_sq =
+        sobel_threshold_scaled * sobel_threshold_scaled;
+
+    auto get = [&](int r, int c) {
+        return static_cast<float>((src + r * stride_elements)[c]);
+    };
 
     for (auto y = 1; y < height - 1; ++y) {
-        const auto img_row_prev = image.data() + (y - 1) * width;
-        const auto img_row_curr = image.data() + y * width;
-        const auto img_row_next = image.data() + (y + 1) * width;
-
         auto ix_row = Ix.data() + y * width;
         auto iy_row = Iy.data() + y * width;
 
         for (auto x = 1; x < width - 1; ++x) {
-            const auto gx = -img_row_prev[x - 1] + img_row_prev[x + 1] +
-                            -2 * img_row_curr[x - 1] + 2 * img_row_curr[x + 1] +
-                            -img_row_next[x - 1] + img_row_next[x + 1];
+            const auto p_tl = get(y - 1, x - 1);
+            const auto p_tc = get(y - 1, x);
+            const auto p_tr = get(y - 1, x + 1);
+            const auto p_ml = get(y, x - 1);
+            const auto p_mr = get(y, x + 1);
+            const auto p_bl = get(y + 1, x - 1);
+            const auto p_bc = get(y + 1, x);
+            const auto p_br = get(y + 1, x + 1);
 
-            const auto gy = -img_row_prev[x - 1] - 2 * img_row_prev[x] -
-                            img_row_prev[x + 1] + img_row_next[x - 1] +
-                            2 * img_row_next[x] + img_row_next[x + 1];
+            const auto gx = -p_tl + p_tr + -2 * p_ml + 2 * p_mr + -p_bl + p_br;
+
+            const auto gy = -p_tl - 2 * p_tc - p_tr + p_bl + 2 * p_bc + p_br;
 
             const auto magnitude_sq = gx * gx + gy * gy;
             edges[y * width + x] = (magnitude_sq > sobel_threshold_sq);
@@ -100,6 +92,15 @@ calculatePSI(const auto src, auto width, auto height, auto stride,
 
     constexpr auto deg_to_rad = std::numbers::pi / 180.0f;
 
+    auto get_normalized = [&](int r, int c) {
+        if constexpr (std::is_same_v<T, float>) {
+            return (src + r * stride_elements)[c];
+        } else {
+            return static_cast<float>((src + r * stride_elements)[c]) /
+                   static_cast<float>(max_val);
+        }
+    };
+
     for (auto y = 0; y < height; ++y) {
         for (auto x = 0; x < width; ++x) {
             const auto idx = y * width + x;
@@ -117,32 +118,37 @@ calculatePSI(const auto src, auto width, auto height, auto stride,
             // Check for horizontal edge, gradient pointing upwards (~90°)
             if (std::abs(angle + 90.0f) < angle_tolerance) {
                 // Search upward
+                auto prev_val_up = get_normalized(y, x);
                 for (auto d = 1; d < height; d++) {
                     auto up = y - d;
                     if (up < 0) {
                         width_up = -1;
                         break;
                     }
-                    if (image[up * width + x] <= image[(up + 1) * width + x]) {
+                    const auto curr_val_up = get_normalized(up, x);
+                    if (curr_val_up <= prev_val_up) {
                         width_up = d - 1;
-                        max_val = image[(up + 1) * width + x];
+                        max_val = prev_val_up;
                         break;
                     }
+                    prev_val_up = curr_val_up;
                 }
 
                 // Search downward
+                auto prev_val_down = get_normalized(y, x);
                 for (auto d = 1; d < height; d++) {
                     auto down = y + d;
                     if (down >= height) {
                         width_down = -1;
                         break;
                     }
-                    if (image[down * width + x] >=
-                        image[(down - 1) * width + x]) {
+                    const auto curr_val_down = get_normalized(down, x);
+                    if (curr_val_down >= prev_val_down) {
                         width_down = d - 1;
-                        min_val = image[(down - 1) * width + x];
+                        min_val = prev_val_down;
                         break;
                     }
+                    prev_val_down = curr_val_down;
                 }
 
                 if (width_up != -1 && width_down != -1) {
@@ -150,7 +156,8 @@ calculatePSI(const auto src, auto width, auto height, auto stride,
                     const auto phi2 = (angle + 90.0f) * deg_to_rad;
                     const auto cos_phi2 = std::cos(phi2);
                     edge_widths[idx] = (width_up + width_down) / cos_phi2;
-                    const auto slope = (max_val - min_val) / edge_widths[idx];
+                    const auto slope =
+                        (max_val - min_val) / edge_widths[idx];
                     if (edge_widths[idx] >= w_jnb) {
                         edge_widths[idx] -= slope;
                     }
@@ -160,32 +167,37 @@ calculatePSI(const auto src, auto width, auto height, auto stride,
             // Check for horizontal edge, gradient pointing downwards (~-90°)
             if (std::abs(angle - 90.0f) < angle_tolerance) {
                 // Search upward
+                auto prev_val_up = get_normalized(y, x);
                 for (auto d = 1; d < height; d++) {
                     auto up = y - d;
                     if (up < 0) {
                         width_up = -1;
                         break;
                     }
-                    if (image[up * width + x] >= image[(up + 1) * width + x]) {
+                    const auto curr_val_up = get_normalized(up, x);
+                    if (curr_val_up >= prev_val_up) {
                         width_up = d - 1;
-                        min_val = image[(up + 1) * width + x];
+                        min_val = prev_val_up;
                         break;
                     }
+                    prev_val_up = curr_val_up;
                 }
 
                 // Search downward
+                auto prev_val_down = get_normalized(y, x);
                 for (auto d = 1; d < height; d++) {
                     auto down = y + d;
                     if (down >= height) {
                         width_down = -1;
                         break;
                     }
-                    if (image[down * width + x] <=
-                        image[(down - 1) * width + x]) {
+                    const auto curr_val_down = get_normalized(down, x);
+                    if (curr_val_down <= prev_val_down) {
                         width_down = d - 1;
-                        max_val = image[(down - 1) * width + x];
+                        max_val = prev_val_down;
                         break;
                     }
+                    prev_val_down = curr_val_down;
                 }
 
                 if (width_up != -1 && width_down != -1) {
@@ -193,7 +205,8 @@ calculatePSI(const auto src, auto width, auto height, auto stride,
                     const auto phi2 = (angle - 90.0f) * deg_to_rad;
                     const auto cos_phi2 = std::cos(phi2);
                     edge_widths[idx] = (width_up + width_down) / cos_phi2;
-                    const auto slope = (max_val - min_val) / edge_widths[idx];
+                    const auto slope =
+                        (max_val - min_val) / edge_widths[idx];
                     if (edge_widths[idx] >= w_jnb) {
                         edge_widths[idx] -= slope;
                     }
@@ -352,6 +365,8 @@ static inline auto VS_CC psiCreate(auto in, auto out,
 
     d.node = vsapi->mapGetNode(in, "clip", 0, 0);
     const auto vi = vsapi->getVideoInfo(d.node);
+
+    d.vi = vi;
 
     if (!vsh::isConstantVideoFormat(vi)) {
         vsapi->mapSetError(
