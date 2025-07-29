@@ -13,7 +13,7 @@ The PSI metric provides a perceptual measure of image sharpness based on local e
 Calculates the Perceptual Sharpness Index of input frames:
 
 ```python
-core.psi.PSI(clip clip[, float percentile=22.0, int blocksize=32, float threshold_w=2.0, float angle_tolerance=8.0, float w_jnb=3.0, float sobel_threshold=0.1])
+core.psi.PSI(clip clip[, float percentile=22.0, int blocksize=32, float threshold_w=2.0, float angle_tolerance=8.0, float w_jnb=3.0, float sobel_threshold=0.1, int output_mode=0])
 ```
 
 #### Parameters:
@@ -24,6 +24,9 @@ core.psi.PSI(clip clip[, float percentile=22.0, int blocksize=32, float threshol
 - `angle_tolerance`: Tolerance for horizontal edge detection in degrees (range: 0-90, default: 8.0)
 - `w_jnb`: Width threshold for Just Noticeable Blur correction (default: 3.0)
 - `sobel_threshold`: Threshold for Sobel edge detection (default: 0.1)
+- `output_mode`: Output mode selection (default: 0)
+  - `0`: Return original input frame (copy)
+  - `1`: Return sharpness distribution map (32-bit float grayscale)
 
 ## Frame Properties
 

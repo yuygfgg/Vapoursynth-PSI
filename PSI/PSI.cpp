@@ -2,6 +2,7 @@
 #include "VapourSynth4.h"
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <format>
@@ -15,6 +16,11 @@ static constexpr auto DEFAULT_W_JNB = 3.0f;
 static constexpr auto DEFAULT_PERCENTILE = 22.0f;
 static constexpr auto DEFAULT_SOBEL_THRESHOLD = 0.1f;
 
+typedef enum {
+    OUTPUT_MODE_ORIGINAL = 0,
+    OUTPUT_MODE_SHARPNESS_MAP = 1
+} OutputMode;
+
 typedef struct {
     VSNode* node;
     const VSVideoInfo* vi;
@@ -27,13 +33,15 @@ typedef struct {
     float angle_tolerance;
     float w_jnb;
     float sobel_threshold;
+    OutputMode output_mode;
 } PSIData;
 
-template <typename T>
+template <typename T, bool NeedSharpnessMap = false>
 static inline auto calculatePSI(auto src, auto width, auto height, auto stride,
                                 auto percentile, auto max_val, auto blocksize,
                                 auto threshold_w, auto angle_tolerance,
-                                auto w_jnb, auto sobel_threshold) noexcept {
+                                auto w_jnb, auto sobel_threshold,
+                                auto sharpness_map = nullptr) noexcept {
     const auto stride_elements = stride / sizeof(T);
 
     const auto total_pixels = width * height;
@@ -275,6 +283,10 @@ static inline auto calculatePSI(auto src, auto width, auto height, auto stride,
         sum_sharpest += avg_w[i];
     }
 
+    if constexpr (NeedSharpnessMap) {
+        std::copy(edge_widths.begin(), edge_widths.end(), sharpness_map);
+    }
+
     return (sum_sharpest > 0.0f)
                ? (static_cast<float>(blocks_to_sum) / sum_sharpest)
                : 0.0f;
@@ -289,6 +301,8 @@ static inline bool getAndValidateParam(auto in, auto vsapi, auto param_name,
     if constexpr (std::is_same_v<T, float>) {
         result = static_cast<T>(vsapi->mapGetFloat(in, param_name, 0, &err));
     } else if constexpr (std::is_same_v<T, int>) {
+        result = static_cast<T>(vsapi->mapGetInt(in, param_name, 0, &err));
+    } else if constexpr (std::is_enum_v<T>) {
         result = static_cast<T>(vsapi->mapGetInt(in, param_name, 0, &err));
     }
 
@@ -306,6 +320,7 @@ static inline bool getAndValidateParam(auto in, auto vsapi, auto param_name,
     return true;
 }
 
+template <OutputMode Mode>
 static inline const VSFrame* VS_CC psiGetFrame(auto n, auto activationReason,
                                                auto instanceData,
                                                [[maybe_unused]] auto frameData,
@@ -321,43 +336,73 @@ static inline const VSFrame* VS_CC psiGetFrame(auto n, auto activationReason,
         const auto height = vsapi->getFrameHeight(src, 0);
         const auto width = vsapi->getFrameWidth(src, 0);
 
-        const auto numPlanes = fi->numPlanes;
-        std::vector<const VSFrame*> planeSrc(numPlanes, src);
-        std::vector<int> planes(numPlanes);
-        for (auto i = 0; i < numPlanes; ++i) {
-            planes[i] = i;
-        }
+        VSFrame* dst;
+        const auto max_val = (d->sample_type == stFloat)
+                                 ? 1.0f
+                                 : static_cast<float>(d->max_value);
 
-        const auto dst = vsapi->newVideoFrame2(
-            fi, width, height, planeSrc.data(), planes.data(), src, core);
+        if constexpr (Mode == OUTPUT_MODE_ORIGINAL) {
+            const auto numPlanes = fi->numPlanes;
+            std::vector<const VSFrame*> planeSrc(numPlanes, src);
+            std::vector<int> planes(numPlanes);
+            for (auto i = 0; i < numPlanes; ++i) {
+                planes[i] = i;
+            }
+
+            dst = vsapi->newVideoFrame2(fi, width, height, planeSrc.data(),
+                                        planes.data(), src, core);
+        } else {
+            VSVideoFormat format;
+            vsapi->queryVideoFormat(&format, cfGray, stFloat, 32, 0, 0, core);
+            dst = vsapi->newVideoFrame(&format, width, height, src, core);
+        }
 
         const void* srcp = vsapi->getReadPtr(src, 0);
         const auto src_stride = vsapi->getStride(src, 0);
 
         auto psi_score = 0.0f;
-        const auto max_val = (d->sample_type == stFloat)
-                                 ? 1.0f
-                                 : static_cast<float>(d->max_value);
+        std::vector<float> sharpness_map;
+        float* sharpness_ptr = nullptr;
+
+        if constexpr (Mode == OUTPUT_MODE_SHARPNESS_MAP) {
+            sharpness_map.resize(width * height);
+            sharpness_ptr = sharpness_map.data();
+        }
 
         if (d->sample_type == stInteger) {
             if (d->bits_per_sample == 8) {
-                psi_score = calculatePSI<uint8_t>(
-                    static_cast<const uint8_t*>(srcp), width, height,
-                    src_stride, d->percentile, max_val, d->blocksize,
-                    d->threshold_w, d->angle_tolerance, d->w_jnb,
-                    d->sobel_threshold);
+                psi_score =
+                    calculatePSI<uint8_t, (Mode == OUTPUT_MODE_SHARPNESS_MAP)>(
+                        static_cast<const uint8_t*>(srcp), width, height,
+                        src_stride, d->percentile, max_val, d->blocksize,
+                        d->threshold_w, d->angle_tolerance, d->w_jnb,
+                        d->sobel_threshold, sharpness_ptr);
             } else {
-                psi_score = calculatePSI<uint16_t>(
-                    static_cast<const uint16_t*>(srcp), width, height,
-                    src_stride, d->percentile, max_val, d->blocksize,
-                    d->threshold_w, d->angle_tolerance, d->w_jnb,
-                    d->sobel_threshold);
+                psi_score =
+                    calculatePSI<uint16_t, (Mode == OUTPUT_MODE_SHARPNESS_MAP)>(
+                        static_cast<const uint16_t*>(srcp), width, height,
+                        src_stride, d->percentile, max_val, d->blocksize,
+                        d->threshold_w, d->angle_tolerance, d->w_jnb,
+                        d->sobel_threshold, sharpness_ptr);
             }
         } else {
-            psi_score = calculatePSI<float>(
-                static_cast<const float*>(srcp), width, height, src_stride,
-                d->percentile, max_val, d->blocksize, d->threshold_w,
-                d->angle_tolerance, d->w_jnb, d->sobel_threshold);
+            psi_score =
+                calculatePSI<float, (Mode == OUTPUT_MODE_SHARPNESS_MAP)>(
+                    static_cast<const float*>(srcp), width, height, src_stride,
+                    d->percentile, max_val, d->blocksize, d->threshold_w,
+                    d->angle_tolerance, d->w_jnb, d->sobel_threshold,
+                    sharpness_ptr);
+        }
+
+        if constexpr (Mode == OUTPUT_MODE_SHARPNESS_MAP) {
+            auto dstp = reinterpret_cast<float*>(vsapi->getWritePtr(dst, 0));
+            const auto dst_stride = vsapi->getStride(dst, 0) / sizeof(float);
+
+            for (auto y = 0; y < height; ++y) {
+                const auto src_row = sharpness_map.data() + y * width;
+                auto dst_row = dstp + y * dst_stride;
+                std::copy(src_row, src_row + width, dst_row);
+            }
         }
 
         vsapi->mapSetFloat(vsapi->getFramePropertiesRW(dst), "PSI", psi_score,
@@ -417,7 +462,7 @@ static inline auto VS_CC psiCreate(auto in, auto out,
     if (!getAndValidateParam(
             in, vsapi, "percentile", DEFAULT_PERCENTILE, d.percentile,
             filter_name, out,
-            [](float val) { return val > 0.0f && val <= 100.0f; },
+            [](auto val) { return val > 0.0f && val <= 100.0f; },
             "percentile must be in the range (0, 100]")) {
         vsapi->freeNode(d.node);
         return;
@@ -425,7 +470,7 @@ static inline auto VS_CC psiCreate(auto in, auto out,
 
     if (!getAndValidateParam(
             in, vsapi, "blocksize", DEFAULT_BLOCKSIZE, d.blocksize, filter_name,
-            out, [](int val) { return val > 0; },
+            out, [](auto val) { return val > 0; },
             "blocksize must be greater than 0")) {
         vsapi->freeNode(d.node);
         return;
@@ -433,7 +478,7 @@ static inline auto VS_CC psiCreate(auto in, auto out,
 
     if (!getAndValidateParam(
             in, vsapi, "threshold_w", DEFAULT_THRESHOLD_W, d.threshold_w,
-            filter_name, out, [](float val) { return val >= 0.0f; },
+            filter_name, out, [](auto val) { return val >= 0.0f; },
             "threshold_w must be non-negative")) {
         vsapi->freeNode(d.node);
         return;
@@ -442,7 +487,7 @@ static inline auto VS_CC psiCreate(auto in, auto out,
     if (!getAndValidateParam(
             in, vsapi, "angle_tolerance", DEFAULT_ANGLE_TOLERANCE,
             d.angle_tolerance, filter_name, out,
-            [](float val) { return val > 0.0f && val <= 90.0f; },
+            [](auto val) { return val > 0.0f && val <= 90.0f; },
             "angle_tolerance must be in the range (0, 90]")) {
         vsapi->freeNode(d.node);
         return;
@@ -450,7 +495,7 @@ static inline auto VS_CC psiCreate(auto in, auto out,
 
     if (!getAndValidateParam(
             in, vsapi, "w_jnb", DEFAULT_W_JNB, d.w_jnb, filter_name, out,
-            [](float val) { return val >= 0.0f; },
+            [](auto val) { return val >= 0.0f; },
             "w_jnb must be non-negative")) {
         vsapi->freeNode(d.node);
         return;
@@ -459,8 +504,20 @@ static inline auto VS_CC psiCreate(auto in, auto out,
     if (!getAndValidateParam(
             in, vsapi, "sobel_threshold", DEFAULT_SOBEL_THRESHOLD,
             d.sobel_threshold, filter_name, out,
-            [](float val) { return val >= 0.0f; },
+            [](auto val) { return val >= 0.0f; },
             "sobel_threshold must be non-negative")) {
+        vsapi->freeNode(d.node);
+        return;
+    }
+
+    if (!getAndValidateParam<OutputMode>(
+            in, vsapi, "output_mode", OUTPUT_MODE_ORIGINAL, d.output_mode,
+            filter_name, out,
+            [](auto val) {
+                return val == OUTPUT_MODE_ORIGINAL ||
+                       val == OUTPUT_MODE_SHARPNESS_MAP;
+            },
+            "output_mode must be 0 (original frame) or 1 (sharpness map)")) {
         vsapi->freeNode(d.node);
         return;
     }
@@ -477,9 +534,23 @@ static inline auto VS_CC psiCreate(auto in, auto out,
     data = static_cast<PSIData*>(malloc(sizeof(d)));
     *data = d;
 
+    VSVideoInfo out_vi = *vi;
+    if (d.output_mode == OUTPUT_MODE_SHARPNESS_MAP) {
+        vsapi->queryVideoFormat(&out_vi.format, cfGray, stFloat, 32, 0, 0,
+                                core);
+    }
+
     VSFilterDependency deps[] = {{d.node, rpStrictSpatial}};
-    vsapi->createVideoFilter(out, filter_name, vi, psiGetFrame, psiFilterFree,
-                             fmParallel, deps, 1, data, core);
+
+    if (d.output_mode == OUTPUT_MODE_ORIGINAL) {
+        vsapi->createVideoFilter(
+            out, filter_name, &out_vi, psiGetFrame<OUTPUT_MODE_ORIGINAL>,
+            psiFilterFree, fmParallel, deps, 1, data, core);
+    } else {
+        vsapi->createVideoFilter(
+            out, filter_name, &out_vi, psiGetFrame<OUTPUT_MODE_SHARPNESS_MAP>,
+            psiFilterFree, fmParallel, deps, 1, data, core);
+    }
 }
 
 VS_EXTERNAL_API(void)
@@ -495,6 +566,7 @@ VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI* vspapi) {
                              "threshold_w:float:opt;"
                              "angle_tolerance:float:opt;"
                              "w_jnb:float:opt;"
-                             "sobel_threshold:float:opt;",
+                             "sobel_threshold:float:opt;"
+                             "output_mode:int:opt;",
                              "clip:vnode;", psiCreate, NULL, plugin);
 }
