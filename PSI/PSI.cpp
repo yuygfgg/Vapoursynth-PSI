@@ -54,12 +54,7 @@ static inline auto calculatePSI(auto src, auto width, auto height, auto stride,
         src_matrix(reinterpret_cast<const T*>(src), height, width,
                    OuterStride<>(stride_elements));
 
-    MatrixXf image_for_sobel;
-    if constexpr (std::is_same_v<T, float>) {
-        image_for_sobel = src_matrix.template cast<float>();
-    } else {
-        image_for_sobel = src_matrix.template cast<float>();
-    }
+    MatrixXf image_for_sobel = src_matrix.template cast<float>();
 
     MatrixXf image_float;
     if constexpr (std::is_same_v<T, float>) {
@@ -103,7 +98,7 @@ static inline auto calculatePSI(auto src, auto width, auto height, auto stride,
     constexpr auto rad_to_deg = 180.0f / std::numbers::pi_v<float>;
 
     auto phi_array = atan2(Iy.array(), Ix.array()) * rad_to_deg;
-    MatrixXf phi = phi_array.matrix();
+    auto phi = phi_array.matrix();
 
     MatrixXf edge_widths = MatrixXf::Zero(height, width);
     auto widths_count = 0;
