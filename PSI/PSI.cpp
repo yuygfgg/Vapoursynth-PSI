@@ -35,15 +35,6 @@ typedef struct {
     OutputMode output_mode;
 } PSIData;
 
-template <typename Derived1, typename Derived2>
-inline auto atan2(const Eigen::ArrayBase<Derived1>& var_y,
-                  const Eigen::ArrayBase<Derived2>& var_x) {
-    using Scalar = typename Derived1::Scalar;
-
-    return var_y.binaryExpr(
-        var_x, [](Scalar y, Scalar x) -> Scalar { return std::atan2(y, x); });
-}
-
 template <typename T, auto NeedSharpnessMap = false>
 static inline auto calculatePSI(auto src, auto width, auto height, auto stride,
                                 auto percentile, auto max_val, auto blocksize,

@@ -17,7 +17,9 @@ else
   install_dir = get_option('libdir') / 'vapoursynth'
 endif
 
-eigen_dep = dependency('eigen3')
+# Use eigen from submodule
+eigen_inc = include_directories('external/eigen')
+eigen_dep = declare_dependency(include_directories: eigen_inc)
 
 blas_lapack_dep = []
 compile_args = []
@@ -88,8 +90,6 @@ else
 endif
 
 
-message(compile_args)
-
 if compile_args.length() > 0
   add_project_arguments(compile_args, language: 'cpp')
 endif
@@ -100,7 +100,8 @@ sources = [
 ]
 
 shared_module('PSI', sources,
-  dependencies: [vapoursynth_dep, eigen_dep],
+  dependencies: [vapoursynth_dep, eigen_dep] + blas_lapack_dep,
+  link_args: link_args,
   install: true,
   install_dir: install_dir,
   gnu_symbol_visibility: 'hidden'
