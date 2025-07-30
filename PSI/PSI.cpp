@@ -36,7 +36,7 @@ typedef struct {
 } PSIData;
 
 template <typename T, auto NeedSharpnessMap = false>
-static inline auto calculatePSI(auto src, auto width, auto height, auto stride,
+static inline auto calculatePSI(const T* VS_RESTRICT src, auto width, auto height, auto stride, // clang handles `auto __restrict` but gcc & msvc don't
                                 auto percentile, auto max_val, auto blocksize,
                                 auto threshold_w, auto angle_tolerance,
                                 auto w_jnb, auto sobel_threshold,
@@ -51,7 +51,7 @@ static inline auto calculatePSI(auto src, auto width, auto height, auto stride,
             : sobel_threshold * static_cast<float>(max_val);
 
     Map<const Matrix<T, Dynamic, Dynamic, RowMajor>, 0, OuterStride<>>
-        src_matrix(reinterpret_cast<const T*>(src), height, width,
+        src_matrix(src, height, width,
                    OuterStride<>(stride_elements));
 
     MatrixXf image_for_sobel = src_matrix.template cast<float>();
