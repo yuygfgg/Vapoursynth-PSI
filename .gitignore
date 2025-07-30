@@ -3,6 +3,5 @@
 .vscode/
 .cache/
 checks.json
-
-# Eigen related build artifacts
-external/*
+subprojects/*
+!subprojects/*.wrap
