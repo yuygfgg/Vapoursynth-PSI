@@ -316,7 +316,7 @@ static inline const VSFrame* VS_CC psiGetFrame(auto n, auto activationReason,
             dst = vsapi->newVideoFrame(&format, width, height, src, core);
         }
 
-        const void* srcp = vsapi->getReadPtr(src, 0);
+        const void* VS_RESTRICT srcp = vsapi->getReadPtr(src, 0);
         const auto src_stride = vsapi->getStride(src, 0);
 
         auto psi_score = 0.0f;
@@ -354,7 +354,7 @@ static inline const VSFrame* VS_CC psiGetFrame(auto n, auto activationReason,
         }
 
         if constexpr (Mode == OUTPUT_MODE_SHARPNESS_MAP) {
-            auto dstp = reinterpret_cast<float*>(vsapi->getWritePtr(dst, 0));
+            float* VS_RESTRICT dstp = reinterpret_cast<float*>(vsapi->getWritePtr(dst, 0));
             const auto dst_stride = vsapi->getStride(dst, 0) / sizeof(float);
 
             for (auto y = 0; y < height; ++y) {
