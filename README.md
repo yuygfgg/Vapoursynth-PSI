@@ -35,10 +35,7 @@ The filter outputs the following frame property:
 
 ## Building
 
-[Eigen](https://github.com/PX4/eigen) is required.
-
 ```bash
-git submodule update --init --recursive -q
 meson setup build
 ninja -C build install
 ```
