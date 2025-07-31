@@ -30,18 +30,20 @@ typedef struct {
     int blocksize;
     float threshold_w;
     float angle_tolerance;
+    float tan_angle_tol;
     float w_jnb;
     float sobel_threshold;
     OutputMode output_mode;
 } PSIData;
 
 template <typename T, auto NeedSharpnessMap = false>
-static inline auto calculatePSI(
-    const T* VS_RESTRICT src, auto width, auto height,
-    auto stride, // clang handles `auto __restrict` but gcc & msvc don't
-    auto percentile, auto max_val, auto blocksize, auto threshold_w,
-    auto angle_tolerance, auto w_jnb, auto sobel_threshold,
-    auto sharpness_map = nullptr) noexcept {
+static inline auto
+calculatePSI(const T* VS_RESTRICT
+                 src, // clang handles `auto __restrict` but gcc & msvc don't
+             auto width, auto height, auto stride, auto percentile,
+             auto max_val, auto blocksize, auto threshold_w, auto tan_angle_tol,
+             auto w_jnb, auto sobel_threshold,
+             auto sharpness_map = nullptr) noexcept {
     using namespace Eigen;
 
     const auto stride_elements = stride / sizeof(T);
@@ -64,27 +66,26 @@ static inline auto calculatePSI(
             src_matrix.template cast<float>() / static_cast<float>(max_val);
     }
 
-    Matrix3f sobel_x, sobel_y;
-
-    // clang-format off
-    sobel_x <<  -1, 0, 1, 
-                -2, 0, 2, 
-                -1, 0, 1;
-
-    sobel_y <<  -1, -2, -1, 
-                0, 0, 0, 
-                1, 2, 1;
-    // clang-format on
-
     MatrixXf Ix = MatrixXf::Zero(height, width);
     MatrixXf Iy = MatrixXf::Zero(height, width);
 
-    for (int y = 1; y < height - 1; ++y) {
-        for (int x = 1; x < width - 1; ++x) {
-            auto neighborhood = image_for_sobel.block<3, 3>(y - 1, x - 1);
+    for (auto y = 1; y < height - 1; ++y) {
+        for (auto x = 1; x < width - 1; ++x) {
+            const auto h_grad_up =
+                image_for_sobel(y - 1, x + 1) - image_for_sobel(y - 1, x - 1);
+            const auto h_grad_mid =
+                image_for_sobel(y, x + 1) - image_for_sobel(y, x - 1);
+            const auto h_grad_down =
+                image_for_sobel(y + 1, x + 1) - image_for_sobel(y + 1, x - 1);
+            Ix(y, x) = h_grad_up + 2.0f * h_grad_mid + h_grad_down;
 
-            Ix(y, x) = (neighborhood.cwiseProduct(sobel_x)).sum();
-            Iy(y, x) = (neighborhood.cwiseProduct(sobel_y)).sum();
+            const auto v_grad_left =
+                image_for_sobel(y + 1, x - 1) - image_for_sobel(y - 1, x - 1);
+            const auto v_grad_mid =
+                image_for_sobel(y + 1, x) - image_for_sobel(y - 1, x);
+            const auto v_grad_right =
+                image_for_sobel(y + 1, x + 1) - image_for_sobel(y - 1, x + 1);
+            Iy(y, x) = v_grad_left + 2.0f * v_grad_mid + v_grad_right;
         }
     }
 
@@ -97,9 +98,6 @@ static inline auto calculatePSI(
 
     MatrixXf edge_widths = MatrixXf::Zero(height, width);
     auto widths_count = 0;
-
-    constexpr auto deg_to_rad = std::numbers::pi_v<float> / 180.0f;
-    const auto tan_angle_tol = std::tan(angle_tolerance * deg_to_rad);
 
     for (auto y = 0; y < height; ++y) {
         for (auto x = 0; x < width; ++x) {
@@ -338,14 +336,14 @@ static inline const VSFrame* VS_CC psiGetFrame(auto n, auto activationReason,
                     calculatePSI<uint8_t, (Mode == OUTPUT_MODE_SHARPNESS_MAP)>(
                         static_cast<const uint8_t*>(srcp), width, height,
                         src_stride, d->percentile, max_val, d->blocksize,
-                        d->threshold_w, d->angle_tolerance, d->w_jnb,
+                        d->threshold_w, d->tan_angle_tol, d->w_jnb,
                         d->sobel_threshold, sharpness_ptr);
             } else {
                 psi_score =
                     calculatePSI<uint16_t, (Mode == OUTPUT_MODE_SHARPNESS_MAP)>(
                         static_cast<const uint16_t*>(srcp), width, height,
                         src_stride, d->percentile, max_val, d->blocksize,
-                        d->threshold_w, d->angle_tolerance, d->w_jnb,
+                        d->threshold_w, d->tan_angle_tol, d->w_jnb,
                         d->sobel_threshold, sharpness_ptr);
             }
         } else {
@@ -353,7 +351,7 @@ static inline const VSFrame* VS_CC psiGetFrame(auto n, auto activationReason,
                 calculatePSI<float, (Mode == OUTPUT_MODE_SHARPNESS_MAP)>(
                     static_cast<const float*>(srcp), width, height, src_stride,
                     d->percentile, max_val, d->blocksize, d->threshold_w,
-                    d->angle_tolerance, d->w_jnb, d->sobel_threshold,
+                    d->tan_angle_tol, d->w_jnb, d->sobel_threshold,
                     sharpness_ptr);
         }
 
@@ -531,6 +529,9 @@ static inline auto VS_CC psiCreate(auto in, auto out,
         }
         d.output_mode = static_cast<OutputMode>(raw_output_mode);
     }
+
+    d.tan_angle_tol =
+        std::tan(d.angle_tolerance * std::numbers::pi_v<float> / 180.0f);
 
     data = static_cast<PSIData*>(malloc(sizeof(d)));
     *data = d;
