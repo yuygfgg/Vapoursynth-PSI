@@ -36,11 +36,12 @@ typedef struct {
 } PSIData;
 
 template <typename T, auto NeedSharpnessMap = false>
-static inline auto calculatePSI(const T* VS_RESTRICT src, auto width, auto height, auto stride, // clang handles `auto __restrict` but gcc & msvc don't
-                                auto percentile, auto max_val, auto blocksize,
-                                auto threshold_w, auto angle_tolerance,
-                                auto w_jnb, auto sobel_threshold,
-                                auto sharpness_map = nullptr) noexcept {
+static inline auto calculatePSI(
+    const T* VS_RESTRICT src, auto width, auto height,
+    auto stride, // clang handles `auto __restrict` but gcc & msvc don't
+    auto percentile, auto max_val, auto blocksize, auto threshold_w,
+    auto angle_tolerance, auto w_jnb, auto sobel_threshold,
+    auto sharpness_map = nullptr) noexcept {
     using namespace Eigen;
 
     const auto stride_elements = stride / sizeof(T);
@@ -51,8 +52,7 @@ static inline auto calculatePSI(const T* VS_RESTRICT src, auto width, auto heigh
             : sobel_threshold * static_cast<float>(max_val);
 
     Map<const Matrix<T, Dynamic, Dynamic, RowMajor>, 0, OuterStride<>>
-        src_matrix(src, height, width,
-                   OuterStride<>(stride_elements));
+        src_matrix(src, height, width, OuterStride<>(stride_elements));
 
     MatrixXf image_for_sobel = src_matrix.template cast<float>();
 
@@ -95,121 +95,125 @@ static inline auto calculatePSI(const T* VS_RESTRICT src, auto width, auto heigh
     Array<bool, Dynamic, Dynamic> edges =
         (magnitude_sq.array() > sobel_threshold_sq);
 
-    constexpr auto rad_to_deg = 180.0f / std::numbers::pi_v<float>;
-
-    auto phi_array = atan2(Iy.array(), Ix.array()) * rad_to_deg;
-    auto phi = phi_array.matrix();
-
     MatrixXf edge_widths = MatrixXf::Zero(height, width);
     auto widths_count = 0;
 
     constexpr auto deg_to_rad = std::numbers::pi_v<float> / 180.0f;
+    const auto tan_angle_tol = std::tan(angle_tolerance * deg_to_rad);
 
     for (auto y = 0; y < height; ++y) {
         for (auto x = 0; x < width; ++x) {
-            if (!edges(y, x) || (Ix(y, x) == 0.0f && Iy(y, x) == 0.0f)) {
+            if (!edges(y, x)) {
                 continue;
             }
 
-            const auto angle = phi(y, x);
-            auto width_up = 0;
-            auto width_down = 0;
-            auto valid_width = false;
-            auto min_val = 0.0f;
-            auto max_val_local = 0.0f;
+            const auto ix_val = Ix(y, x);
+            const auto iy_val = Iy(y, x);
 
-            if (std::abs(angle + 90.0f) < angle_tolerance) {
-                auto prev_val_up = image_float(y, x);
-                for (auto d = 1; d < height; d++) {
-                    auto up = y - d;
-                    if (up < 0) {
-                        width_up = -1;
-                        break;
-                    }
-                    const auto curr_val_up = image_float(up, x);
-                    if (curr_val_up <= prev_val_up) {
-                        width_up = d - 1;
-                        max_val_local = prev_val_up;
-                        break;
-                    }
-                    prev_val_up = curr_val_up;
-                }
-
-                auto prev_val_down = image_float(y, x);
-                for (auto d = 1; d < height; d++) {
-                    auto down = y + d;
-                    if (down >= height) {
-                        width_down = -1;
-                        break;
-                    }
-                    const auto curr_val_down = image_float(down, x);
-                    if (curr_val_down >= prev_val_down) {
-                        width_down = d - 1;
-                        min_val = prev_val_down;
-                        break;
-                    }
-                    prev_val_down = curr_val_down;
-                }
-
-                if (width_up != -1 && width_down != -1) {
-                    valid_width = true;
-                    const auto phi2 = (angle + 90.0f) * deg_to_rad;
-                    const auto cos_phi2 = std::cos(phi2);
-                    edge_widths(y, x) = (width_up + width_down) / cos_phi2;
-                    const auto slope =
-                        (max_val_local - min_val) / edge_widths(y, x);
-                    if (edge_widths(y, x) >= w_jnb) {
-                        edge_widths(y, x) -= slope;
-                    }
-                }
-            } else if (std::abs(angle - 90.0f) < angle_tolerance) {
-                auto prev_val_up = image_float(y, x);
-                for (auto d = 1; d < height; d++) {
-                    auto up = y - d;
-                    if (up < 0) {
-                        width_up = -1;
-                        break;
-                    }
-                    const auto curr_val_up = image_float(up, x);
-                    if (curr_val_up >= prev_val_up) {
-                        width_up = d - 1;
-                        min_val = prev_val_up;
-                        break;
-                    }
-                    prev_val_up = curr_val_up;
-                }
-
-                auto prev_val_down = image_float(y, x);
-                for (auto d = 1; d < height; d++) {
-                    auto down = y + d;
-                    if (down >= height) {
-                        width_down = -1;
-                        break;
-                    }
-                    const auto curr_val_down = image_float(down, x);
-                    if (curr_val_down <= prev_val_down) {
-                        width_down = d - 1;
-                        max_val_local = prev_val_down;
-                        break;
-                    }
-                    prev_val_down = curr_val_down;
-                }
-
-                if (width_up != -1 && width_down != -1) {
-                    valid_width = true;
-                    const auto phi2 = (angle - 90.0f) * deg_to_rad;
-                    const auto cos_phi2 = std::cos(phi2);
-                    edge_widths(y, x) = (width_up + width_down) / cos_phi2;
-                    const auto slope =
-                        (max_val_local - min_val) / edge_widths(y, x);
-                    if (edge_widths(y, x) >= w_jnb) {
-                        edge_widths(y, x) -= slope;
-                    }
-                }
+            if (ix_val == 0.0f && iy_val == 0.0f) {
+                continue;
             }
 
-            if (valid_width) {
-                ++widths_count;
+            if (std::abs(ix_val) < std::abs(iy_val) * tan_angle_tol) {
+                auto width_up = 0;
+                auto width_down = 0;
+                auto valid_width = false;
+                auto min_val = 0.0f;
+                auto max_val_local = 0.0f;
+
+                if (iy_val < 0.0f) { // Angle near -90 deg
+                    auto prev_val_up = image_float(y, x);
+                    for (auto d = 1; d < height; d++) {
+                        auto up = y - d;
+                        if (up < 0) {
+                            width_up = -1;
+                            break;
+                        }
+                        const auto curr_val_up = image_float(up, x);
+                        if (curr_val_up <= prev_val_up) {
+                            width_up = d - 1;
+                            max_val_local = prev_val_up;
+                            break;
+                        }
+                        prev_val_up = curr_val_up;
+                    }
+
+                    auto prev_val_down = image_float(y, x);
+                    for (auto d = 1; d < height; d++) {
+                        auto down = y + d;
+                        if (down >= height) {
+                            width_down = -1;
+                            break;
+                        }
+                        const auto curr_val_down = image_float(down, x);
+                        if (curr_val_down >= prev_val_down) {
+                            width_down = d - 1;
+                            min_val = prev_val_down;
+                            break;
+                        }
+                        prev_val_down = curr_val_down;
+                    }
+
+                    if (width_up != -1 && width_down != -1) {
+                        valid_width = true;
+                        const auto mag = std::sqrt(magnitude_sq(y, x));
+                        const auto cos_phi2 = std::abs(iy_val) / mag;
+                        edge_widths(y, x) = (width_up + width_down) / cos_phi2;
+                        const auto slope =
+                            (max_val_local - min_val) / edge_widths(y, x);
+                        if (edge_widths(y, x) >= w_jnb) {
+                            edge_widths(y, x) -= slope;
+                        }
+                    }
+                } else { // Angle near 90 deg (iy_val > 0)
+                    auto prev_val_up = image_float(y, x);
+                    for (auto d = 1; d < height; d++) {
+                        auto up = y - d;
+                        if (up < 0) {
+                            width_up = -1;
+                            break;
+                        }
+                        const auto curr_val_up = image_float(up, x);
+                        if (curr_val_up >= prev_val_up) {
+                            width_up = d - 1;
+                            min_val = prev_val_up;
+                            break;
+                        }
+                        prev_val_up = curr_val_up;
+                    }
+
+                    auto prev_val_down = image_float(y, x);
+                    for (auto d = 1; d < height; d++) {
+                        auto down = y + d;
+                        if (down >= height) {
+                            width_down = -1;
+                            break;
+                        }
+                        const auto curr_val_down = image_float(down, x);
+                        if (curr_val_down <= prev_val_down) {
+                            width_down = d - 1;
+                            max_val_local = prev_val_down;
+                            break;
+                        }
+                        prev_val_down = curr_val_down;
+                    }
+
+                    if (width_up != -1 && width_down != -1) {
+                        valid_width = true;
+                        const auto mag = std::sqrt(magnitude_sq(y, x));
+                        const auto cos_phi2 = std::abs(iy_val) / mag;
+                        edge_widths(y, x) = (width_up + width_down) / cos_phi2;
+                        const auto slope =
+                            (max_val_local - min_val) / edge_widths(y, x);
+                        if (edge_widths(y, x) >= w_jnb) {
+                            edge_widths(y, x) -= slope;
+                        }
+                    }
+                }
+
+                if (valid_width) {
+                    ++widths_count;
+                }
             }
         }
     }
@@ -354,7 +358,8 @@ static inline const VSFrame* VS_CC psiGetFrame(auto n, auto activationReason,
         }
 
         if constexpr (Mode == OUTPUT_MODE_SHARPNESS_MAP) {
-            float* VS_RESTRICT dstp = reinterpret_cast<float*>(vsapi->getWritePtr(dst, 0));
+            float* VS_RESTRICT dstp =
+                reinterpret_cast<float*>(vsapi->getWritePtr(dst, 0));
             const auto dst_stride = vsapi->getStride(dst, 0) / sizeof(float);
 
             for (auto y = 0; y < height; ++y) {
