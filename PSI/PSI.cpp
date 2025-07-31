@@ -558,7 +558,7 @@ VS_EXTERNAL_API(void)
 VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI* vspapi) {
     vspapi->configPlugin("com.yuygfgg.psi", "psi",
                          "VapourSynth PSI (Perceptual Sharpness Index) Plugin",
-                         VS_MAKE_VERSION(1, 0), VAPOURSYNTH_API_VERSION, 0,
+                         VS_MAKE_VERSION(3, 0), VAPOURSYNTH_API_VERSION, 0,
                          plugin);
     vspapi->registerFunction("PSI",
                              "clip:vnode;"
