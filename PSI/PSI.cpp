@@ -262,12 +262,11 @@ calculatePSI(const T* VS_RESTRICT
         return 0.0f;
     }
 
-    auto sum_sharpest = 0.0f;
     const auto blocks_to_sum =
         std::min(nr_of_used_blocks, static_cast<int>(avg_w.size()));
 
     Eigen::Map<const Eigen::VectorXf> avg_w_vec(avg_w.data(), blocks_to_sum);
-    sum_sharpest = avg_w_vec.sum();
+    const auto sum_sharpest = avg_w_vec.sum();
 
     if constexpr (NeedSharpnessMap) {
         Map<Matrix<float, Dynamic, Dynamic, RowMajor>> output_map(
