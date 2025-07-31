@@ -2,6 +2,7 @@ project('PSI', 'cpp',
   default_options: ['buildtype=release', 'warning_level=2', 'b_lto=true', 'b_ndebug=if-release', 'cpp_std=c++20'],
   license: 'GPL-3.0-or-later',
   meson_version: '>=0.60.0',
+  version: '2.0'
 )
 
 cxx = meson.get_compiler('cpp')
@@ -19,16 +20,6 @@ endif
 
 # Use eigen from meson wrap (force fallback to always use wrap instead of system)
 eigen_dep = dependency('', required: false, fallback: ['eigen', 'eigen_dep'])
-
-format_test_code = '''
-#include <format>
-int main() {
-    std::format("test");
-    return 0;
-}
-'''
-
-has_std_format = cxx.compiles(format_test_code, name: 'std::format support')
 
 blas_lapack_dep = []
 compile_args = []
